@@ -62,6 +62,8 @@
 #include "vport-internal_dev.h"
 #include "vport-netdev.h"
 
+#include "../ofsoftswitch/hw-lib/nf2_of_api.h"
+
 int ovs_net_id __read_mostly;
 
 static void ovs_notify(struct sk_buff *skb, struct genl_info *info,
@@ -179,7 +181,6 @@ struct vport *ovs_lookup_vport(const struct datapath *dp, u16 port_no)
 {
 	struct vport *vport;
 	struct hlist_head *head;
-
 	head = vport_hash_bucket(dp, port_no);
 	hlist_for_each_entry_rcu(vport, head, dp_hash_node) {
 		if (vport->port_no == port_no)
@@ -807,7 +808,7 @@ static int ovs_flow_cmd_new_or_set(struct sk_buff *skb, struct genl_info *info)
 
 		ovs_flow_mask_key(&masked_key, &key, &mask);
 		error = ovs_nla_copy_actions(a[OVS_FLOW_ATTR_ACTIONS],
-					     &masked_key, 0, &acts);
+					     &masked_key, 0, &acts); //validate&copy nlattr to sw_flow_actions
 		if (error) {
 			OVS_NLERR("Flow actions may not be safe on all matching packets.\n");
 			goto err_kfree;
@@ -841,6 +842,30 @@ static int ovs_flow_cmd_new_or_set(struct sk_buff *skb, struct genl_info *info)
 		flow->key = masked_key;
 		flow->unmasked_key = key;
 		rcu_assign_pointer(flow->sf_acts, acts);
+
+    /* Flow is ready, translate the information now*/
+    //TODO
+    struct nf2_of_entry flow_entry_info;
+    struct nf2_of_action flow_action_info;
+    flow_entry_info.transp_src = flow->unmasked_key.ipv4.tp.src;
+    flow_entry_info.transp_dst = flow->unmasked_key.ipv4.tp.dst;
+    flow_entry_info.ip_proto = flow->unmasked_key.ip.proto;
+    flow_entry_info.ip_src = flow->unmasked_key.ipv4.addr.src;
+    flow_entry_info.ip_dst = flow->unmasked_key.ipv4.addr.dst;
+    flow_entry_info.ip_dst = flow->unmasked_key.ipv4.addr.dst;
+    flow_entry_info.eth_type = flow->unmasked_key.eth.type;
+    for (int i = 0; i < 6; i++)
+    {
+      flow_entry_info.eth_src[i] = flow->unmasked_key.eth.src[5 - i];
+      flow_entry_info.eth_dst[i] = flow->unmasked_key.eth.dst[5 - i];
+    }
+    flow_entry_info.ip_tos = flow->unmasked_key.ip.tos; 
+    flow_entry_info.vlan_id = flow->unmasked_key.eth.tci;
+    flow_entry_info.src_port = flow->unmasked_key.phy.in_port;
+    
+
+    /*Deal with mask*/
+    /*Deal with actions*/
 
 		/* Put flow in bucket. */
 		error = ovs_flow_tbl_insert(&dp->table, flow, &mask);
