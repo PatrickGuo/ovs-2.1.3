@@ -63,6 +63,7 @@
 #include "vport-netdev.h"
 
 #include "../ofsoftswitch/hw-lib/nf2_of_api.h"
+#include "../ofsoftswitch/hw-lib/reg_defines_openflow_switch.h"
 
 int ovs_net_id __read_mostly;
 
@@ -845,7 +846,9 @@ static int ovs_flow_cmd_new_or_set(struct sk_buff *skb, struct genl_info *info)
 
     /* Flow is ready, translate the information now*/
     //TODO
+    /* Deal with flow key */
     struct nf2_of_entry flow_entry_info;
+    struct nf2_of_mask flow_mask_info;
     struct nf2_of_action flow_action_info;
     flow_entry_info.transp_src = flow->unmasked_key.ipv4.tp.src;
     flow_entry_info.transp_dst = flow->unmasked_key.ipv4.tp.dst;
@@ -864,8 +867,102 @@ static int ovs_flow_cmd_new_or_set(struct sk_buff *skb, struct genl_info *info)
     flow_entry_info.src_port = flow->unmasked_key.phy.in_port;
     
 
-    /*Deal with mask*/
-    /*Deal with actions*/
+    /* Deal with mask */
+    flow_mask_info.transp_src = 0;
+    flow_mask_info.transp_dst = 0;
+    flow_mask_info.ip_proto = 0;
+    flow_mask_info.eth_type = 0;
+    flow_mask_info.src_port = 0;
+    flow_mask_info.vlan_id = 0;
+    flow_mask_info.ip_tos &= 0xff;
+    flow_mask_info.ip_src = mask.key.ipv4.addr.src;
+    flow_mask_info.ip_dst = mask.key.ipv4.addr.dst;
+    for (int i = 0; i < 6; i++)
+    {
+      flow_mask_info.eth_src[i] = mask.key.eth.src[5 - i];
+      flow_mask_info.eth_dst[i] = mask.key.eth.dst[5 - i];
+    }
+
+
+
+    /* Deal with actions
+     * POP_VLAN
+     * OUTPUT
+     * SET_XXX
+     */
+    for (int i = 0; i < acts->actions_len; i++)
+    {
+      const struct nlattr *a = &(acts->actions[i]);
+      switch (nla_type(a)){  
+      case OVS_ACTION_ATTR_OUTPUT:
+			  uint32_t prev_port = nla_get_u32(a);
+        if (prev_port != -1) // prev_port starts at 1
+        {
+          flow_action_info.forward_mask = (uint16_t)pow(2,(prev_port-1)*2);
+        }
+        else
+        {
+          flow_action_info.forward_mask |= 0x55;
+        }
+			  break;
+      
+      case OVS_ACTION_ATTR_POP_VLAN:
+        flow_action_info.nf2_action_flag |= NF2_OFPAT_STRIP_VLAN;
+      
+      case OVS_ACTION_ATTR_SET:
+        const struct nlattr *inner_a = nla_data(a);
+        switch (nla_type(inner_a)){
+	      case OVS_KEY_ATTR_ETHERNET:
+          for (int i = 0; i < 6; i++)
+          {
+		        flow_action_info.eth_src[5 - i] = (nla_data(inner_a))->eth_src[i];
+            flow_action_info.eth_dst[5 - i] = (nla_data(inner_a))->eth_dst[i];
+          }
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_DL_SRC;
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_DL_DST;
+		      break;
+
+	      case OVS_KEY_ATTR_IPV4:
+		      flow_action_info.ip_src = (nla_data(inner_a))->ipv4_src;
+          flow_action_info.ip_dst = (nla_data(inner_a))->ipv4_dst;
+          flow_action_info.ip_tos = (nla_data(inner_a))->ipv4_toi;
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_NW_SRC;
+		      flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_NW_DST;
+          break;
+
+	      case OVS_KEY_ATTR_TCP:
+		      flow_action_info.transp_src = (nla_data(inner_a))->tcp_src;
+		      flow_action_info.transp_dst = (nla_data(inner_a))->tcp_dst;
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_TP_SRC;
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_TP_DST;
+          break;
+
+        case OVS_KEY_ATTR_VLAN: 
+          flow_action_info.vlan_id = (nla_data(inner_a))->vlan_tci;
+          flow_action_info.vlan_pcp = uint8_t((nla_data(inner_a))->vlan_tci);
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_VLAN_VID;
+          flow_action_info.nf2_action_flag |= NF2_OFPAT_SET_VLAN_PCP;
+        }
+      }
+    }
+
+    /* Do install flow on FPGA*/
+    nf2_of_entry_wrap *entry_ptr;
+    nf2_of_mask_wrap *mask_ptr;
+    nf2_of_action_wrap *action_ptr;
+    nf2_flow_entry_init(entry_ptr, mask_ptr, action_ptr);
+    entry_ptr->entry = flow_entry_info;
+    mask_ptr->entry = flow_mask_info;
+    action_ptr->action = flow_action_info;
+    
+    int row = flow->unmasked_key.phy.priority;
+    struct nf2device dev; // Need to set 'dev' variable
+    dev.device_name = "";
+    dev.fd = int;
+    dev.net_iface = int;
+
+    nf2_install_flow_entry(&dev, row, entry_ptr, mask_ptr, action_ptr);
+    
 
 		/* Put flow in bucket. */
 		error = ovs_flow_tbl_insert(&dp->table, flow, &mask);
